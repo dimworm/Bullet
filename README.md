@@ -19,7 +19,7 @@ Bullet有什么用呢？可以用来打游戏。前提是游戏dApp的开发者�
 目前Bullet智能合约部署在测试网上进行测试，合适的时候会转到主网。为了证明Bullet的工作原理可行，并且帮助建立Bullet的生态，我打算在锐Rui钱包里集成对Bullet的支持，包括转账、质押、提币等，甚至可能包括Bullet的交易。第二，我还打算把老母鸡(Oldhen)游戏跑起来，大家就可以用Bullet打游戏了。
 
 BulletVault在测试网的地址是：
-```rho:id:nozr3wyo3sqftix6ckiwapzatks6qq4zofftuxxi4ewr5y8orc43ib```
+```rho:id:auz8oqkczecbiq7jmeeeoyackumqybo4pijfec3rnjccwz6mhtqr9t```
 
-质押币的大池子地址是：```11112CyBHsXVNvafvTYkRE2gVxnpFEmUf29DoWbbo7U7iWWViV7AKD```
+质押币的大池子地址是：```11112QLdkH7gj4KmJbZSG45jLpFMd9i7pQ2YZKk6iSkPVFJGb8mUro```
 不要向大池子直接打测试币，必须通过调用deposit函数才能触发Bullet铸币。
