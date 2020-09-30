@@ -1,0 +1,358 @@
+new
+  BulletVault, rs(`rho:registry:insertSigned:secp256k1`), uriOut,
+  rl(`rho:registry:lookup`), RevAddress(`rho:rev:address`),
+  insertArbitrary(`rho:registry:insertArbitrary`),
+  stdout(`rho:io:stdout`), deployId(`rho:rchain:deployId`),
+  MakeMintCh, AuthKeyCh, EitherCh, TreeHashMapCh, RevVaultCh, 
+  _makeVault,
+  _newVault,
+  _create,
+  _bulletVault,
+  _transferTemplate,
+  _depositTemplate
+in {
+  rl!(`rho:rchain:makeMint`, *MakeMintCh) |
+  rl!(`rho:rchain:authKey`, *AuthKeyCh) |
+  rl!(`rho:lang:either`, *EitherCh) |
+  rl!(`rho:lang:treeHashMap`, *TreeHashMapCh) |
+  rl!(`rho:rchain:revVault`, *RevVaultCh) |
+  for (@(_, MakeMint) <- MakeMintCh;
+       @(_, AuthKey)  <- AuthKeyCh;
+       @(_, Either)   <- EitherCh;
+       @(_, RevVault) <- RevVaultCh; 
+       TreeHashMap    <- TreeHashMapCh) {
+    new mintCh, revMapStore, bulletMapStore, initVault, unf, authKeyCh, revHouseAddrCh in {
+      // generate revHouse for holding deposited REV 
+      RevAddress!("fromUnforgeable", *unf, *revHouseAddrCh) |
+      @RevVault!("unforgeableAuthKey", *unf, *authKeyCh) |
+      for (@revHouseVaultAuthKey <- authKeyCh;  @revHouseAddr <- revHouseAddrCh) {
+        new revHouseVaultCh, _depositList in {
+          @RevVault!("findOrCreate", revHouseAddr, *revHouseVaultCh) |
+          deployId!(["revHouseAddr : ",revHouseAddr])|
+          // mapstore for depositing REV
+          TreeHashMap!("init", 2, *revMapStore) |
+          // mapstore for bullet token
+          TreeHashMap!("init", 2, *bulletMapStore)| 
+          for (@(true, revHouseVault) <- revHouseVaultCh; @revMap <- revMapStore; @bulletMap <- bulletMapStore) {
+            @MakeMint!(*mintCh) |
+            for (mint <- mintCh) {
+              contract initVault(name, @address, @initialAmount) = {
+                new purseCh in {
+                  mint!("makePurse", initialAmount, *purseCh) |
+                  for (purse <- purseCh) {
+                    _newVault!(*name, address, *purse)  
+                  }
+                }
+              } |
+
+              contract BulletVault(@"deployerAuthKey", deployerId, ret) = {
+                new DeployerIdOps(`rho:rchain:deployerId:ops`),
+                    revAddrCh, deployerPubKeyBytesCh
+                in {
+                  DeployerIdOps!("pubKeyBytes", *deployerId, *deployerPubKeyBytesCh) |
+                  for (@deployerPubKeyBytes <- deployerPubKeyBytesCh) {
+                    RevAddress!("fromPublicKey", deployerPubKeyBytes, *revAddrCh) |
+                    for (@deployerRevAddress <- revAddrCh) {
+                      @AuthKey!("make", (*_bulletVault, deployerRevAddress), *ret)
+                    }
+                  }
+                }
+              } |
+              contract BulletVault(@"unforgeableAuthKey", unf, ret) = {
+                new revAddrCh in {
+                  RevAddress!("fromUnforgeable", *unf, *revAddrCh) |
+                  for (@unfRevAddress <- revAddrCh) {
+                    @AuthKey!("make", (*_bulletVault, unfRevAddress), *ret)
+                  }
+                }
+              } |
+              contract BulletVault(@"findOrCreate", @revAddress, retCh) = {
+                new revAddressValidCh, revAddressValidEitherCh in {
+                  RevAddress!("validate", revAddress, *revAddressValidCh) |
+                  @Either!("fromNillableError <-", *revAddressValidCh, *revAddressValidEitherCh) |
+                  for (@revAddressEither <- revAddressValidEitherCh) {
+                    match revAddressEither {
+                      (false, _) => {
+                        retCh!(revAddressEither)
+                      }
+                      _ => {
+                        new createVault, vaultCh, getVaultCh in {
+                          TreeHashMap!("get", bulletMap, revAddress, *getVaultCh) |
+                          for (@vault <- getVaultCh) {
+                            if (vault != Nil) {
+                              retCh!((true, vault))
+                            } else {
+                              _create!(revAddress, *createVault, *vaultCh) |
+                              for (vaultRetCh <- createVault) {
+                                _makeVault!(revAddress, 0, *vaultRetCh) |
+                                for (@eitherVault <- vaultCh) {
+                                  retCh!(eitherVault)
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              } |
+
+              contract BulletVault(@"deposit", @amount, retCh) = {
+                new DeployerIdOps(`rho:rchain:deployerId:ops`),
+                    revAddrCh, deployerPubKeyBytesCh, deployerId(`rho:rchain:deployerId`)  
+                in {
+                  DeployerIdOps!("pubKeyBytes", *deployerId, *deployerPubKeyBytesCh) |
+                  for (@deployerPubKeyBytes <- deployerPubKeyBytesCh) {
+                    RevAddress!("fromPublicKey", deployerPubKeyBytes, *revAddrCh) |
+                    for (@deployerRevAddress <- revAddrCh) {
+                      new vaultCh, revVaultkeyCh in {
+                        @RevVault!("findOrCreate", deployerRevAddress, *vaultCh) |
+                        @RevVault!("deployerAuthKey", *deployerId, *revVaultkeyCh) |
+                        for (@(true, vault) <- vaultCh; key <- revVaultkeyCh) {
+                          // TODO: if the amount is below 10 REV, won't trigger.
+                          new resultCh, ackCh, blockData(`rho:block:data`), tCh in {
+                            @vault!("transfer", revHouseAddr, amount, *key, *resultCh) |
+                            blockData!(*tCh) |
+                            for (@result <- resultCh; @_, @t, @_ <- tCh) {
+                              // TODO: If transfer failed,...
+                              _depositList!("deposit", deployerRevAddress, {"timestamp":t,"amount":amount}, *ackCh)|
+                              // send Bullet
+                              new createVault, bulletVaultCh, balanceCh, vaultCh, vaultCh, getVaultCh in {
+                                TreeHashMap!("get", bulletMap, deployerRevAddress, *getVaultCh) |
+                                for (@vault <- getVaultCh) {
+                                  if (vault != Nil) {
+                                    @vault!("balance", *balanceCh)| 
+                                    for (@balance <- balanceCh) {
+                                      _create!(deployerRevAddress, *createVault, *bulletVaultCh) |
+                                      for (vaultRetCh <- createVault) {
+                                        _makeVault!(deployerRevAddress, amount * 2 /100 + balance, *vaultRetCh) |
+                                        for (@eitherVault <- bulletVaultCh) {
+                                          retCh!(eitherVault)
+                                        }
+                                      }
+                                    }      
+                                  } else {
+                                    _create!(deployerRevAddress, *createVault, *bulletVaultCh) |
+                                    for (vaultRetCh <- createVault) {
+                                      _makeVault!(deployerRevAddress, amount * 2 /100, *vaultRetCh) |
+                                      for (@eitherVault <- bulletVaultCh) {
+                                        retCh!(eitherVault)
+                                      }
+                                    }  
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  } 
+                }       
+              } |
+
+              contract BulletVault(@"withdraw", retCh) = {
+                new DeployerIdOps(`rho:rchain:deployerId:ops`),
+                    revAddrCh, deployerPubKeyBytesCh, RevVaultCh, deployerId(`rho:rchain:deployerId`), getBalanceCh  
+                in {
+                  DeployerIdOps!("pubKeyBytes", *deployerId, *deployerPubKeyBytesCh) |
+                  for (@deployerPubKeyBytes <- deployerPubKeyBytesCh) {
+                    RevAddress!("fromPublicKey", deployerPubKeyBytes, *revAddrCh) |
+                    for (@deployerRevAddress <- revAddrCh) {                         
+                      _depositList!("withdraw", deployerRevAddress, *retCh)
+                    }        
+                  }
+                } 
+              } |  
+
+              contract _depositList(@"deposit", @deployerRevAddress, @item, ackCh) = {
+                new listCh in {
+                  TreeHashMap!("get", revMap, deployerRevAddress, *listCh) |
+                  for (@list <- listCh) {
+                    if(list == Nil) {
+                      TreeHashMap!("set", revMap, deployerRevAddress, [item], *ackCh) 
+                    }else{
+                      TreeHashMap!("set", revMap, deployerRevAddress, list ++ [item], *ackCh) 
+                    }
+
+                  }                
+                }  
+              } |
+
+              contract _depositList(@"withdraw", @deployerRevAddress, retCh) = {
+                new blockData(`rho:block:data`), tCh, _remove, liCh, ret in {
+                  blockData!(*tCh) |
+                  TreeHashMap!("get", revMap, deployerRevAddress, *liCh) |
+                  for (@_, @t, @_ <- tCh; @li <- liCh) {
+                    if (li == [] or li == Nil) {
+                      deployId!("No record found!")
+                    } else{
+                      _remove!(t, li, *ret)
+                      |deployId!(["list: ", li])
+                    }
+                  }|
+                  contract _remove (newTimeStamp, items, ret) = {
+                    new resultCh, ack, removeAck in {
+                      if(*items != []){
+                        if (*items.nth(0).get("timestamp") < (*newTimeStamp - 200000)) {
+                          @revHouseVault!("transfer", deployerRevAddress, *items.nth(0).get("amount"), revHouseVaultAuthKey, *resultCh) |
+                          for (@res <- resultCh) {
+                            TreeHashMap!("set", revMap, deployerRevAddress, *items.slice(1,*items.length()), *ack) |
+                            for (@ackn <- ack) {
+                              _remove!( *newTimeStamp, *items.slice(1,*items.length()), *removeAck)|
+                              ret!(true)
+                              |
+                              new re1 in {
+                                TreeHashMap!("get", revMap, deployerRevAddress, *re1) |
+                                for (@r <- re1) {
+                                  deployId!(["The removing result: ", r])
+                                }
+                              }  
+                            }
+                          }
+                        }else{
+                          ret!(true)|
+                          retCh!(true)|
+                          new re in {
+                            TreeHashMap!("get", revMap, deployerRevAddress, *re) |
+                            for (@lis <- re) {
+                                deployId!(["Final result:", lis])
+                              }
+                          }    
+                        } 
+                      }                      
+                    }       
+                  }  
+                }
+              } |  
+              contract _create(@revAddress, constructor, retCh) = {
+                // The vault was not found, create a new one and set it in the bulletMap.
+                new resCh, ackCh, ackCh2 in {
+                  constructor!(*resCh) |
+                  for (@eitherVault <- resCh) {
+                    match eitherVault {
+                      (true, vault) => {
+                        TreeHashMap!("set", bulletMap, revAddress, vault, *ackCh) |
+                        for (_ <- ackCh; _ <- ackCh2) {
+                          retCh!(eitherVault)
+                        }
+                      }
+                      (false, _)    => {
+                        retCh!(eitherVault)
+                      }
+                    }
+                  }
+                }
+              } |
+              contract _makeVault(@ownerRevAddress, @initialAmount, ret) = {
+                new revAddrCh, eitherRevAddrCh, purseCh, eitherPurseCh, mkVault in {
+                  @Either!("fromNillable", ownerRevAddress, "Required `revAddress` parameter was Nil", *eitherRevAddrCh) |
+                  mint!("makePurse", initialAmount, *purseCh) |
+                  @Either!("fromNillable <-", *purseCh, "Couldn't create purse", *eitherPurseCh) |
+                  @Either!("map2 <-", *eitherRevAddrCh, *eitherPurseCh,
+                    for (@addr, purse, r <- mkVault) {
+                      new bulletVault in {
+                        _newVault!(*bulletVault, addr, *purse) |
+                        r!(bundle+{*bulletVault})
+                      }
+                    },
+                    *ret
+                  )
+                }
+              } |
+              contract _newVault(bulletVault, @ownRevAddress, purse) = {
+                new logStore in {
+                  logStore!(Nil) |
+                  contract bulletVault(@"balance", ret) = {
+                    purse!("getBalance", *ret)
+                  } |
+                  contract bulletVault(@"transfer", @revAddress, @amount, authKey, ret) = {
+                    new ret2 in {
+                      _transferTemplate!(ownRevAddress, *purse, revAddress, amount, *authKey, *ret2) |
+                      for (@result <- ret2) {
+                        ret!(result) |
+                        for (logCh <<- logStore) {
+                          if (Nil != *logCh) {
+                            new bd(`rho:block:data`), bdCh in {
+                              bd!(*bdCh) |
+                              for (@blockNumber, @timestamp, @sender <- bdCh) {
+                                logCh!(["transfer", revAddress, amount, result, blockNumber, timestamp, sender])
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  } |
+                  contract bulletVault(@"setLog", logCh, authKey, ret) = {
+                    new authKeyValidCh in {
+                      @AuthKey!("check", *authKey, (*_bulletVault, ownRevAddress), *authKeyValidCh) |
+                      for (@result <- authKeyValidCh) {
+                        if (result) {
+                          new ack in {
+                            for (_ <- logStore) {
+                              logStore!(*logCh) |
+                              purse!("setLog", *logCh, *ack) |
+                              for (_ <- ack) {
+                                ret!(true)
+                              }
+                            }
+                          }
+                        } else {
+                          ret!(false)
+                        }
+                      }
+                    }
+                  } |
+                  contract @{ownRevAddress | bundle0{*_bulletVault}}(@"_deposit", depositPurse, retCh) = {
+                    _depositTemplate!(*purse, *depositPurse, *retCh)
+                  }
+                }
+              } |
+              contract _transferTemplate(@ownRevAddress, purse, @revAddress, @amount, authKey, ret) = {
+                new revAddressValid, revAddressValidEither, amountNonNegative,
+                    authKeyValidCh, authKeyValidEitherCh,
+                    parametersOkCh, parametersAndAuthOkCh,
+                    split, eitherPurseCh, doDeposit
+                in {
+                  RevAddress!("validate", revAddress, *revAddressValid) |
+                  @Either!("fromNillableError <-", *revAddressValid, *revAddressValidEither) |
+                  @Either!("fromBoolean", amount >= 0, "Amount must be non-negative", *amountNonNegative) |
+                  @AuthKey!("check", *authKey, (*_bulletVault, ownRevAddress), *authKeyValidCh) |
+                  @Either!("fromBoolean <-", *authKeyValidCh, "Invalid AuthKey", *authKeyValidEitherCh) |
+                  @Either!("productR <-", *revAddressValidEither, *amountNonNegative, *parametersOkCh) |
+                  @Either!("productR <-", *parametersOkCh, *authKeyValidEitherCh, *parametersAndAuthOkCh) |
+                  @Either!("flatMap <-", *parametersAndAuthOkCh, *split, *eitherPurseCh) |
+                  for (_, retCh <- split) {
+                    new amountPurseCh in {
+                      purse!("split", amount, *amountPurseCh) |
+                      @Either!("fromSingletonList <-", *amountPurseCh, "Insufficient funds", *retCh)
+                    }
+                  } |
+                  @Either!("flatMap <-", *eitherPurseCh, *doDeposit, *ret) |
+                  for (@p, retCh <- doDeposit) {
+                    @{revAddress | bundle0{*_bulletVault}}!("_deposit", p, *retCh)
+                  }
+                }
+              } |
+              contract _depositTemplate(toPurse, fromPurse, retCh) = {
+                new amountCh, depositSuccessCh in {
+                  fromPurse!("getBalance", *amountCh) |
+                  for (@amount <- amountCh) {
+                    toPurse!("deposit", amount, *fromPurse, *depositSuccessCh) |
+                    @Either!("fromBoolean <-", *depositSuccessCh, "BUG FOUND: purse deposit failed", *retCh)
+                  }
+                }
+              } |
+              insertArbitrary!(bundle+{*BulletVault}, *uriOut) |
+              for(@uri <- uriOut) {
+                deployId!(uri)
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}      
